@@ -1,0 +1,9 @@
+streamlit
+PyMuPDF==1.23.25     # exposes `import fitz`
+spacy<4.0
+sentence-transformers
+faiss-cpu
+langchain
+pandas
+numpy
+tqdm

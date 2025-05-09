@@ -1,1 +1,0 @@
-# mahni_ai_mvp
