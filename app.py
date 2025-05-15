@@ -1,66 +1,89 @@
 import streamlit as st
-import fitz  # PyMuPDF
-import spacy
+
+# Set up page configuration
+st.set_page_config(
+    page_title="Mahni.ai – CV Analyzer",
+    layout="wide"
+)
+
+# Load necessary libraries
 from pathlib import Path
-import tempfile
-import faiss
+import tempfile, fitz
 from sentence_transformers import SentenceTransformer
+from cv_analyzer import analyze_cv
 
-# ----- Setup (cache so Streamlit Cloud doesn’t redownload) -----
-@st.cache_resource
-def load_spacy():
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        # First run inside container – download model
-        from spacy.cli import download
-        download("en_core_web_sm")
-        return spacy.load("en_core_web_sm")
-        
-@st.cache_resource
-def load_embedder():
-    return SentenceTransformer("sentence-transformers/paraphrase-MiniLM-L6-v2")
+# Initialize SentenceTransformer model
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
+import faiss
+from job_finder import fetch_jobs
+from course_recommender import recommend_courses
 
-nlp = load_spacy()
-embedder = load_embedder()
+# Set up language toggle
+lang = st.radio("🌐 اختر اللغة / Choose language", ["English", "العربية"], horizontal=True)
 
-# ----- UI -----
-st.set_page_config(page_title="Mahni.ai – CV Analyzer", layout="wide")
-st.title("📄 Mahni.ai • CV Analyzer MVP")
+# Set up file upload
+uploaded = st.file_uploader("Upload your CV (PDF)", type=["pdf"])
 
-uploaded = st.file_uploader("Upload your CV (PDF, DOCX coming soon)", type=["pdf"])
+# Define function to extract PDF text
+def extract_pdf_text(uploaded_file):
+    tmp = Path(tempfile.mkstemp(suffix=".pdf")[1])
+    tmp.write_bytes(uploaded_file.read())
+    doc  = fitz.open(tmp)
+    text = " ".join(p.get_text() for p in doc)
+    return text
+
+# Analyze CV and display results
 if uploaded:
-    # Persist file to temp for PyMuPDF
-    tmp_path = Path(tempfile.mkstemp(suffix=".pdf")[1])
-    tmp_path.write_bytes(uploaded.read())
-    
-    with st.spinner("🔍 Extracting text..."):
-        doc = fitz.open(tmp_path)
-        text = " ".join(page.get_text() for page in doc)
-    
-    st.subheader("Raw text")
-    st.text_area("CV contents", text, height=200)
-    
-    # ----- Basic skill extraction -----
-    st.subheader("👇 Detected skills")
-    doc_spacy = nlp(text)
-    skill_list = [ent.text for ent in doc_spacy.ents if ent.label_ in {"ORG", "PRODUCT", "SKILL"}]
-    
-    if not skill_list:
-        st.warning("No obvious skills found – try a different CV or refine rules.")
+    cv_text = extract_pdf_text(uploaded)
+    result  = analyze_cv(cv_text, lang=lang)
+
+    # Display detected skills
+    st.subheader("🧠 " + ("المهارات المكتشفة" if lang == "العربية" else "Detected Skills"))
+    if result["skills"]:
+        st.success(result["notes"])
+        st.write(result["skills"])
     else:
-        st.success(f"Found {len(skill_list)} potential skills")
-        st.write(skill_list)
-    
-    # ----- Embedding + FAISS demo (toy search) -----
-    if st.button("Build FAISS index and run similarity demo"):
-        with st.spinner("Crunching vectors…"):
-            vecs = embedder.encode(skill_list)
-            index = faiss.IndexFlatL2(vecs.shape[1])
-            index.add(vecs)
-        st.info("Index built ✅ Type any skill to find nearest match.")
-        q = st.text_input("Query skill")
-        if q:
-            qvec = embedder.encode([q])
-            D, I = index.search(qvec, k=3)
-            st.write([skill_list[i] for i in I[0]])
+        st.warning("لم يتم العثور على مهارات." if lang == "العربية"
+                   else "No skills detected.")
+
+    # Display recommended jobs
+    st.subheader("🔎 Live jobs that match your top skills")
+    top_skills = result["skills"][:3]
+    for sk in top_skills:
+        jobs = fetch_jobs(sk, location="Saudi Arabia", lang="en", max_hits=3)
+        st.markdown(f"#### 💼 {sk.title()} jobs in KSA")
+        if not jobs:
+            st.write("No fresh listings.")
+        else:
+            for j in jobs:
+                st.markdown(f"**{j['title']}** — _{j['company']}_  \n"
+                            f"{j['where']}  \n{j['snippet']}  \n"
+                            f"[Apply]({j['link']})")
+                st.markdown("---")
+
+    # Display recommended courses
+    st.subheader("🎓 Recommended courses")
+    courses = recommend_courses(result["skills"], max_hits=5)
+    if not courses:
+        st.write("No course suggestions yet.")
+    else:
+        for c in courses:
+            st.markdown(f"**{c['title']}** — {c['platform']}  \n"
+                        f"[Open course]({c['url']})")
+
+    # Run FAISS similarity demo
+    if result["skills"]:
+        if st.button("🔍 تجربة تشابه المهارات" if lang == "العربية"
+                     else "🔍 Run similarity demo"):
+            skill_names_en = [txt.split("/")[0].strip() for txt in result["skills"]]
+            vecs = embedder.encode(skill_names_en)
+            index = faiss.IndexFlatL2(vecs.shape[1]); index.add(vecs)
+            st.success("Index built ✅")
+
+            q = st.text_input("اكتب مهارة للمقارنة" if lang == "العربية"
+                              else "Type a skill to compare")
+            if q:
+                qvec, _ = faiss.normalize_L2(embedder.encode([q]))
+                D, I = index.search(qvec, k=min(3, len(skill_names_en)))
+                st.write("🧭 أقرب المهارات:" if lang == "العربية" else "🧭 Closest matches:")
+                st.write([result["skills"][i] for i in I[0]])
